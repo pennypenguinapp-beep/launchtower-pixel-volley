@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Pixel Volley — LaunchTower</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --accent: #58a6ff;
+    --p1: #ff6b6b;
+    --p2: #4ecdc4;
+    --text: #e6edf3;
+    --muted: #8b949e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 8px;
+    padding: 8px;
+  }
+  #hud {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 900px;
+    padding: 6px 12px;
+    background: var(--panel);
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+  .score { font-size: 22px; font-weight: bold; }
+  .s1 { color: var(--p1); }
+  .s2 { color: var(--p2); }
+  #msg { color: var(--muted); font-size: 13px; text-align: center; }
+  #stage {
+    position: relative;
+    width: 100%;
+    max-width: 900px;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #10151c;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    image-rendering: pixelated;
+  }
+  #controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+    max-width: 900px;
+  }
+  button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.active { background: #1f6feb; border-color: #1f6feb; }
+  #help {
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+    max-width: 900px;
+    line-height: 1.5;
+  }
+  footer {
+    margin-top: 4px;
+    font-size: 11px;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <span class="score s1" id="sc1">0</span>
+    <span id="msg">P1: A/D move, W jump &nbsp;|&nbsp; P2: ←/→ move, ↑ jump</span>
+    <span class="score s2" id="sc2">0</span>
+  </div>
+  <div id="stage">
+    <canvas id="cv" width="900" height="500"></canvas>
+  </div>
+  <div id="controls">
+    <button id="bMode" class="active">Mode: vs AI</button>
+    <button id="bPause">Pause</button>
+    <button id="bReset">Reset</button>
+  </div>
+  <div id="help">First to 11 wins the set. Ball must cross the net on your side of the floor to score.</div>
+  <footer>LaunchTower · <a href="https://pennypenguinapp-beep.github.io/" target="_blank" rel="noopener">more pixel tools &amp; games</a></footer>
+</div>
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+
+  const FLOOR = H - 60;
+  const NET_X = W / 2;
+  const NET_TOP = FLOOR - 150;
+  const NET_W = 8;
+
+  const GRAV = 0.55;
+  const MOVE = 4.2;
+  const JUMP = -11.5;
+  const PLAYER_R = 22;
+  const BALL_R = 10;
+  const WIN_SCORE = 11;
+
+  const P1C = '#ff6b6b', P2C = '#4ecdc4';
+
+  let mode = 'ai'; // 'ai' | '2p'
+  let paused = false;
+  let scores = [0, 0];
+  let serving = 0; // 0 = p1 serves, 1 = p2 serves
+  let rally = 0;
+  let lastTouch = -1;
+  let state = 'serve'; // 'serve' | 'play' | 'point' | 'gameover'
+  let pointTimer = 0;
+  let pointMsg = '';
+
+  const players = [
+    { x: W * 0.25, y: FLOOR - PLAYER_R, vx: 0, vy: 0, onGround: true, facing: 1, color: P1C, squash: 1 },
+    { x: W * 0.75, y: FLOOR - PLAYER_R, vx: 0, vy: 0, onGround: true, facing: -1, color: P2C, squash: 1 }
+  ];
+
+  const ball = { x: W * 0.25, y: FLOOR - 160, vx: 0, vy: 0, spin: 0 };
+  const trail = [];
+
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','KeyW','KeyA','KeyD'].includes(e.code)) e.preventDefault();
+    if (e.code === 'Space' || e.code === 'Enter') {
+      if (state === 'gameover') resetMatch();
+      else if (state === 'serve') launchServe();
+    }
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  // Touch: left half = P1, right half = P2. Tap = jump.
+  function touchPlayer(e) {
+    const rect = cv.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width * W;
+    return x < NET_X ? 0 : 1;
+  }
+  cv.addEventListener('touchstart', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const p = touchPlayer(t);
+      if (state === 'serve' && p === serving) { launchServe(); continue; }
+      if (state === 'gameover') { resetMatch(); continue; }
+      if (state === 'play') {
+        const pl = players[p];
+        if (pl.onGround) { pl.vy = JUMP; pl.onGround = false; pl.squash = 0.7; }
+      }
+    }
+  }, { passive: false });
+  cv.addEventListener('touchend', e => e.preventDefault(), { passive: false });
+  cv.addEventListener('mousedown', e => {
+    const p = touchPlayer(e);
+    if (state === 'serve' && p === serving) { launchServe(); return; }
+    if (state === 'gameover') { resetMatch(); return; }
+    if (state === 'play') {
+      const pl = players[p];
+      if (pl.onGround) { pl.vy = JUMP; pl.onGround = false; pl.squash = 0.7; }
+    }
+  });
+
+  const bMode = document.getElementById('bMode');
+  const bPause = document.getElementById('bPause');
+  const bReset = document.getElementById('bReset');
+  bMode.addEventListener('click', () => {
+    mode = (mode === 'ai') ? '2p' : 'ai';
+    bMode.textContent = 'Mode: ' + (mode === 'ai' ? 'vs AI' : '2P Local');
+    resetMatch();
+  });
+  bPause.addEventListener('click', () => {
+    paused = !paused;
+    bPause.textContent = paused ? 'Resume' : 'Pause';
+  });
+  bReset.addEventListener('click', resetMatch);
+
+  function resetMatch() {
+    scores = [0, 0];
+    serving = 0;
+    state = 'serve';
+    paused = false;
+    bPause.textContent = 'Pause';
+    setupServe();
+    updateHUD();
+  }
+
+  function setupServe() {
+    rally = 0;
+    lastTouch = -1;
+    trail.length = 0;
+    players[0].x = W * 0.25; players[0].y = FLOOR - PLAYER_R; players[0].vx = 0; players[0].vy = 0; players[0].onGround = true;
+    players[1].x = W * 0.75; players[1].y = FLOOR - PLAYER_R; players[1].vx = 0; players[1].vy = 0; players[1].onGround = true;
+    const sx = serving === 0 ? W * 0.25 : W * 0.75;
+    ball.x = sx;
+    ball.y = FLOOR - 160;
+    ball.vx = 0; ball.vy = 0;
+    pointMsg = (serving === 0 ? 'P1' : 'P2') + ' to serve — tap / Space';
+    updateHUD();
+  }
+
+  function launchServe() {
+    if (state !== 'serve') return;
+    const dir = serving === 0 ? 1 : -1;
+    ball.vx = dir * (5 + Math.random() * 1.5);
+    ball.vy = -7 - Math.random() * 1.5;
+    lastTouch = serving;
+    rally = 0;
+    state = 'play';
+    updateHUD();
+  }
+
+  function updateHUD() {
+    document.getElementById('sc1').textContent = scores[0];
+    document.getElementById('sc2').textContent = scores[1];
+    document.getElementById('msg').textContent =
+      (state === 'gameover') ? pointMsg :
+      (state === 'point') ? pointMsg :
+      (state === 'serve') ? pointMsg :
+      (mode === 'ai' ? 'P1: A/D move, W jump  |  AI plays P2' : 'P1: A/D + W  |  P2: ←/→ + ↑');
+  }
+
+  function scorePoint(winner) {
+    scores[winner]++;
+    serving = winner;
+    state = 'point';
+    pointTimer = 70;
+    if (scores[winner] >= WIN_SCORE) {
+      state = 'gameover';
+      pointMsg = (winner === 0 ? 'P1' : 'P2') + ' WINS!  Press Space / tap to rematch';
+    } else {
+      pointMsg = (winner === 0 ? 'P1' : 'P2') + ' scores!';
+    }
+    updateHUD();
+  }
+
+  // AI: track ball when it's on its side, jump when ball is close and above
+  function aiControl(p, idx) {
+    const mySide = idx === 1 ? ball.x > NET_X : ball.x < NET_X;
+    let target = W * (idx === 0 ? 0.25 : 0.75);
+    if (mySide) {
+      target = ball.x + (idx === 1 ? -10 : 10);
+    }
+    target = Math.max(idx === 0 ? 40 : NET_X + 40, Math.min(idx === 0 ? NET_X - 40 : W - 40, target));
+    const dx = target - p.x;
+    p.vx = Math.abs(dx) > 4 ? Math.sign(dx) * MOVE * 0.85 : 0;
+
+    // jump if ball is within reach and descending toward us
+    const dxB = ball.x - p.x, dyB = ball.y - p.y;
+    const dist = Math.hypot(dxB, dyB);
+    if (mySide && dist < 120 && ball.vy > -2 && p.onGround && ball.y > p.y - 140) {
+      p.vy = JUMP; p.onGround = false; p.squash = 0.7;
+    }
+  }
+
+  function step() {
+    if (paused) return;
+
+    if (state === 'point') {
+      pointTimer--;
+      if (pointTimer <= 0) { state = 'serve'; setupServe(); }
+      return;
+    }
+    if (state === 'gameover') return;
+
+    // player input
+    const p1 = players[0], p2 = players[1];
+    if (state === 'play' || state === 'serve') {
+      // P1
+      let mv = 0;
+      if (keys['KeyA']) mv -= 1;
+      if (keys['KeyD']) mv += 1;
+      p1.vx = mv * MOVE;
+      if (keys['KeyW'] && p1.onGround) { p1.vy = JUMP; p1.onGround = false; p1.squash = 0.7; }
+      // P2
+      if (mode === '2p') {
+        let mv2 = 0;
+        if (keys['ArrowLeft']) mv2 -= 1;
+        if (keys['ArrowRight']) mv2 += 1;
+        p2.vx = mv2 * MOVE;
+        if (keys['ArrowUp'] && p2.onGround) { p2.vy = JUMP; p2.onGround = false; p2.squash = 0.7; }
+      } else {
+        aiControl(p2, 1);
+      }
+    }
+
+    // physics for players
+    for (const p of players) {
+      p.vy += GRAV;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.squash += (1 - p.squash) * 0.15;
+      const minX = p === p1 ? PLAYER_R : NET_X + NET_W / 2 + PLAYER_R;
+      const maxX = p === p1 ? NET_X - NET_W / 2 - PLAYER_R : W - PLAYER_R;
+      if (p.x < minX) { p.x = minX; p.vx = 0; }
+      if (p.x > maxX) { p.x = maxX; p.vx = 0; }
+      if (p.y >= FLOOR - PLAYER_R) {
+        if (!p.onGround) p.squash = 0.6;
+        p.y = FLOOR - PLAYER_R;
+        p.vy = 0;
+        p.onGround = true;
+      }
+    }
+
+    if (state === 'serve') {
+      // ball hovers above server, bobbing
+      const sx = serving === 0 ? W * 0.25 : W * 0.75;
+      ball.x = sx;
+      ball.y = FLOOR - 160 + Math.sin(Date.now() / 300) * 6;
+      return;
+    }
+
+    // ball physics
+    ball.vy += GRAV * 0.85;
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.spin += ball.vx * 0.05;
+
+    // walls
+    if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx *= -0.85; }
+    if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx *= -0.85; }
+    // ceiling
+    if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy *= -0.85; }
+
+    // net collision (treat as vertical segment)
+    if (ball.x + BALL_R > NET_X - NET_W / 2 && ball.x - BALL_R < NET_X + NET_W / 2) {
+      if (ball.y + BALL_R > NET_TOP) {
+        // hit the net
+        if (ball.x < NET_X) { ball.x = NET_X - NET_W / 2 - BALL_R; ball.vx *= -0.6; }
+        else { ball.x = NET_X + NET_W / 2 + BALL_R; ball.vx *= -0.6; }
+        ball.vy *= 0.9;
+      }
+    }
+
+    // player-ball collision
+    for (let i = 0; i < 2; i++) {
+      const p = players[i];
+      const dx = ball.x - p.x, dy = ball.y - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d < PLAYER_R + BALL_R) {
+        const nx = dx / (d || 1), ny = dy / (d || 1);
+        // push out
+        ball.x = p.x + nx * (PLAYER_R + BALL_R);
+        ball.y = p.y + ny * (PLAYER_R + BALL_R);
+        // reflect velocity with player motion + upward pop
+        const pvx = p.vx, pvy = p.vy;
+        const dot = ball.vx * nx + ball.vy * ny;
+        ball.vx = ball.vx - 2 * dot * nx + pvx * 0.6;
+        ball.vy = ball.vy - 2 * dot * ny + pvy * 0.6 - 2.5;
+        // cap speed
+        const sp = Math.hypot(ball.vx, ball.vy);
+        const maxSp = 14;
+        if (sp > maxSp) { ball.vx = ball.vx / sp * maxSp; ball.vy = ball.vy / sp * maxSp; }
+        if (lastTouch !== i) { rally++; lastTouch = i; }
+        p.squash = 0.65;
+      }
+    }
+
+    // trail
+    trail.push({ x: ball.x, y: ball.y, a: 1 });
+    if (trail.length > 14) trail.shift();
+    for (const t of trail) t.a *= 0.88;
+
+    // floor: score
+    if (ball.y + BALL_R >= FLOOR) {
+      ball.y = FLOOR - BALL_R;
+      const side = ball.x < NET_X ? 0 : 1; // side the ball landed on
+      // point goes to the OTHER side (the one that hit it over)
+      const scorer = side === 0 ? 1 : 0;
+      scorePoint(scorer);
+    }
+  }
+
+  function drawBlob(p) {
+    const sx = 1 / p.squash, sy = p.squash;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.scale(sx, sy);
+    // body
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, PLAYER_R, PLAYER_R * 1.05, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // darker bottom
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, PLAYER_R * 0.45, PLAYER_R * 0.9, PLAYER_R * 0.5, 0, 0, Math.PI);
+    ctx.fill();
+    // eyes
+    const ex = p.facing * 6;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(ex - 5, -6, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ex + 7, -6, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(ex - 5 + p.facing * 1.5, -6, 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ex + 7 + p.facing * 1.5, -6, 2.4, 0, Math.PI * 2); ctx.fill();
+    // blush
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath(); ctx.arc(ex - 10, 2, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // background gradient
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#10151c');
+    g.addColorStop(1, '#1a2230');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // stars
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    for (let i = 0; i < 40; i++) {
+      const x = (i * 137.5) % W;
+      const y = (i * 89.7) % (FLOOR - 120);
+      ctx.fillRect(x, y, 2, 2);
+    }
+
+    // floor
+    ctx.fillStyle = '#243040';
+    ctx.fillRect(0, FLOOR, W, H - FLOOR);
+    ctx.strokeStyle = '#3a4a5e';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, FLOOR); ctx.lineTo(W, FLOOR); ctx.stroke();
+    // floor grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 45) {
+      ctx.beginPath(); ctx.moveTo(x, FLOOR); ctx.lineTo(x, H); ctx.stroke();
+    }
+
+    // net posts
+    ctx.fillStyle = '#3a4a5e';
+    ctx.fillRect(NET_X - NET_W / 2 - 4, NET_TOP - 6, 4, FLOOR - NET_TOP + 6);
+    ctx.fillRect(NET_X + NET_W / 2, NET_TOP - 6, 4, FLOOR - NET_TOP + 6);
+    // net mesh
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1;
+    for (let y = NET_TOP; y < FLOOR; y += 12) {
+      ctx.beginPath(); ctx.moveTo(NET_X - NET_W / 2, y); ctx.lineTo(NET_X + NET_W / 2, y); ctx.stroke();
+    }
+    // net top band
+    ctx.fillStyle = '#e6edf3';
+    ctx.fillRect(NET_X - NET_W / 2 - 2, NET_TOP - 4, NET_W + 4, 6);
+
+    // trail
+    for (let i = 0; i < trail.length; i++) {
+      const t = trail[i];
+      ctx.fillStyle = `rgba(255, 220, 120, ${t.a * 0.35})`;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, BALL_R * (0.4 + i / trail.length * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // players
+    drawBlob(players[0]);
+    drawBlob(players[1]);
+
+    // ball
+    ctx.save();
+    ctx.translate(ball.x, ball.y);
+    ctx.rotate(ball.spin);
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath(); ctx.arc(0, 0, BALL_R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#b8860b';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, BALL_R, 0, Math.PI * 2); ctx.stroke();
+    // seams
+    ctx.beginPath(); ctx.moveTo(-BALL_R, 0); ctx.lineTo(BALL_R, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -BALL_R); ctx.lineTo(0, BALL_R); ctx.stroke();
+    ctx.restore();
+
+    // serve indicator
+    if (state === 'serve') {
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.font = 'bold 16px monospace';
+      ctx.textAlign = 'center';
+      const sx = serving === 0 ? W * 0.25 : W * 0.75;
+      ctx.fillText('▼', sx, FLOOR - 200);
+    }
+
+    // pause overlay
+    if (paused) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 32px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('PAUSED', W / 2, H / 2);
+    }
+  }
+
+  function loop() {
+    step();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  resetMatch();
+  loop();
+})();
+</script>
+</body>
+</html>
